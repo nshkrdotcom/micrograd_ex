@@ -197,7 +197,11 @@ test/
 mix deps.get
 mix format --check-formatted
 mix test
+mix credo
+mix dialyzer
 ```
+
+`mix quality` runs the formatter check, Credo, and Dialyzer together.
 
 Validate the Livebook structure:
 

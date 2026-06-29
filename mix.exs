@@ -8,7 +8,8 @@ defmodule MicrogradEx.MixProject do
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      docs: docs()
+      docs: docs(),
+      aliases: aliases()
     ]
   end
 
@@ -22,7 +23,15 @@ defmodule MicrogradEx.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:ex_doc, "~> 0.40.3", only: :dev, runtime: false}
+    ]
+  end
+
+  defp aliases do
+    [
+      quality: ["format --check-formatted", "credo --strict", "dialyzer"]
     ]
   end
 
