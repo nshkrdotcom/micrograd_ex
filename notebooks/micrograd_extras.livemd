@@ -1,0 +1,320 @@
+# MicrogradEx Extras
+
+This notebook goes beyond the official parity path in `micrograd_demo.livemd`. The examples are bounded so they stay usable with scalar autodiff.
+
+## Setup
+
+```elixir
+micrograd_ex_path =
+  [
+    System.get_env("MICROGRAD_EX_PATH"),
+    Path.expand("..", __DIR__),
+    Path.expand(".", __DIR__),
+    File.cwd!(),
+    Path.expand("micrograd_ex", File.cwd!())
+  ]
+  |> Enum.reject(&is_nil/1)
+  |> Enum.find(fn path ->
+    File.exists?(Path.join(path, "mix.exs")) and
+      File.exists?(Path.join(path, "lib/micrograd_ex.ex"))
+  end) ||
+    raise """
+    Could not locate the MicrogradEx Mix project.
+
+    Set MICROGRAD_EX_PATH to the repository path, for example:
+    /home/home/p/g/n/learning/micrograd_ex
+    """
+
+Mix.install([
+  {:micrograd_ex, path: micrograd_ex_path},
+  {:kino, "~> 0.14"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:vega_lite, "~> 0.1"}
+])
+
+alias VegaLite, as: Vl
+
+alias MicrogradEx.NN
+alias MicrogradEx.NN.MLP
+alias MicrogradEx.Datasets
+alias MicrogradEx.Losses
+alias MicrogradEx.Trainer
+alias MicrogradEx.PlotData
+```
+
+## 1. Why this notebook exists
+
+The main notebook stays close to the official micrograd demo. This notebook explores the knobs people naturally ask about: dataset shape, noise, model size, regularization, learning rate, decision-boundary resolution, and controlled failure modes.
+
+The cells use small sample counts and short training runs. Increase them only when you are ready to wait for scalar training.
+
+```elixir
+seed = {1, 2, 3}
+```
+
+## 2. Dataset explorer
+
+These static examples cover the same knobs you would expose as bounded controls: dataset type, noise, and sample count.
+
+```elixir
+dataset_examples = [
+  moons_clean: Datasets.moons(80, noise: 0.0, seed: seed),
+  moons_noisy: Datasets.moons(80, noise: 0.2, seed: seed),
+  spiral: Datasets.spiral(80, noise: 0.05, seed: seed),
+  blobs: Datasets.blobs(80, noise: 0.25, seed: seed)
+]
+
+dataset_rows =
+  Enum.flat_map(dataset_examples, fn {name, dataset} ->
+    dataset
+    |> PlotData.dataset_points()
+    |> Enum.map(&Map.put(&1, :dataset, Atom.to_string(name)))
+  end)
+
+Vl.new(width: 560, height: 360)
+|> Vl.data_from_values(dataset_rows)
+|> Vl.mark(:point, filled: true, size: 65)
+|> Vl.encode_field(:x, "x", type: :quantitative)
+|> Vl.encode_field(:y, "y", type: :quantitative)
+|> Vl.encode_field(:color, "label", type: :nominal)
+|> Vl.encode_field(:shape, "dataset", type: :nominal)
+```
+
+## 3. Architecture comparison
+
+This compares model capacity on a small moons dataset. The `[32, 32, 1]` model is included but kept to a short run.
+
+```elixir
+comparison_dataset = Datasets.moons(40, noise: 0.1, seed: seed)
+
+architecture_specs = [
+  small: [8, 8, 1],
+  official: [16, 16, 1],
+  large: [32, 32, 1]
+]
+
+architecture_results =
+  Enum.map(architecture_specs, fn {name, layers} ->
+    model = MLP.new(2, layers, seed: seed)
+    initial = Losses.max_margin(model, comparison_dataset.xs, comparison_dataset.ys)
+
+    run =
+      Trainer.train(model, comparison_dataset,
+        steps: 8,
+        alpha: 1.0e-4,
+        learning_rate: fn k -> 0.35 - 0.2 * k / 8.0 end
+      )
+
+    %{
+      name: Atom.to_string(name),
+      layers: inspect(layers),
+      parameter_count: NN.parameter_count(model),
+      initial_loss: initial.total_loss.data,
+      final_loss: run.final_loss,
+      final_accuracy_percent: run.final_accuracy * 100.0
+    }
+  end)
+
+architecture_results
+|> Kino.DataTable.new()
+```
+
+## 4. Regularization comparison
+
+L2 regularization changes the balance between fitting the data and keeping parameters small.
+
+```elixir
+regularization_specs = [
+  no_regularization: 0.0,
+  default: 1.0e-4,
+  stronger: 1.0e-2
+]
+
+regularization_results =
+  Enum.map(regularization_specs, fn {name, alpha} ->
+    model = MLP.new(2, [8, 8, 1], seed: seed)
+
+    run =
+      Trainer.train(model, comparison_dataset,
+        steps: 8,
+        alpha: alpha,
+        learning_rate: 0.25
+      )
+
+    abs_mean =
+      run.final_model
+      |> NN.parameters()
+      |> Enum.map(&abs(&1.data))
+      |> then(&(Enum.sum(&1) / length(&1)))
+
+    final_row = List.last(run.history)
+
+    %{
+      name: Atom.to_string(name),
+      alpha: alpha,
+      final_loss: run.final_loss,
+      data_loss: final_row.data_loss,
+      reg_loss: final_row.reg_loss,
+      final_accuracy_percent: run.final_accuracy * 100.0,
+      mean_abs_parameter: abs_mean
+    }
+  end)
+
+regularization_results
+|> Kino.DataTable.new()
+```
+
+## 5. Learning-rate comparison
+
+The learning-rate schedule can matter as much as model size.
+
+```elixir
+learning_rate_specs = [
+  constant_0_1: 0.1,
+  constant_0_5: 0.5,
+  official_decay: &Trainer.official_micrograd_learning_rate/1
+]
+
+learning_rate_runs =
+  Enum.map(learning_rate_specs, fn {name, learning_rate} ->
+    model = MLP.new(2, [8, 8, 1], seed: seed)
+
+    run =
+      Trainer.train(model, comparison_dataset,
+        steps: 8,
+        alpha: 1.0e-4,
+        learning_rate: learning_rate
+      )
+
+    {Atom.to_string(name), run}
+  end)
+
+learning_rate_rows =
+  Enum.flat_map(learning_rate_runs, fn {name, run} ->
+    Enum.map(run.history, fn row ->
+      %{run: name, step: row.step, metric: "loss", value: row.loss}
+    end)
+  end)
+
+Vl.new(width: 640, height: 280)
+|> Vl.data_from_values(learning_rate_rows)
+|> Vl.mark(:line)
+|> Vl.encode_field(:x, "step", type: :quantitative)
+|> Vl.encode_field(:y, "value", type: :quantitative)
+|> Vl.encode_field(:color, "run", type: :nominal)
+```
+
+## 6. Decision-boundary resolution
+
+Smaller `h` values produce smoother-looking boundaries but require many more scalar forward passes.
+
+```elixir
+boundary_model = MLP.new(2, [8, 8, 1], seed: seed)
+
+boundary_run =
+  Trainer.train(boundary_model, comparison_dataset,
+    steps: 12,
+    alpha: 1.0e-4,
+    learning_rate: 0.25
+  )
+
+resolution_results =
+  [coarse: 0.5, default: 0.25, fine: 0.15]
+  |> Enum.map(fn {name, h} ->
+    boundary = PlotData.decision_boundary(boundary_run.final_model, comparison_dataset, h: h)
+
+    %{
+      name: Atom.to_string(name),
+      h: h,
+      grid_points: length(boundary)
+    }
+  end)
+
+resolution_results
+|> Kino.DataTable.new()
+```
+
+## 7. Spiral dataset challenge
+
+Spirals are harder than moons. Do not expect perfect accuracy from every short scalar run.
+
+```elixir
+spiral =
+  Datasets.spiral(60,
+    noise: 0.05,
+    turns: 1.5,
+    seed: seed
+  )
+
+spiral_model = MLP.new(2, [16, 16, 1], seed: seed)
+
+spiral_run =
+  Trainer.train(spiral_model, spiral,
+    steps: 20,
+    alpha: 1.0e-4,
+    learning_rate: fn k -> 0.4 - 0.25 * k / 20.0 end
+  )
+
+%{
+  final_loss: spiral_run.final_loss,
+  final_accuracy_percent: spiral_run.final_accuracy * 100.0
+}
+```
+
+```elixir
+spiral_boundary = PlotData.decision_boundary(spiral_run.final_model, spiral, h: 0.35)
+spiral_points = PlotData.dataset_points(spiral)
+
+spiral_background =
+  Vl.new()
+  |> Vl.data_from_values(spiral_boundary)
+  |> Vl.mark(:point, filled: true, opacity: 0.25, size: 60)
+  |> Vl.encode_field(:x, "x", type: :quantitative)
+  |> Vl.encode_field(:y, "y", type: :quantitative)
+  |> Vl.encode_field(:color, "predicted", type: :nominal)
+
+spiral_foreground =
+  Vl.new()
+  |> Vl.data_from_values(spiral_points)
+  |> Vl.mark(:point, filled: true, size: 75, stroke: "black", strokeWidth: 1)
+  |> Vl.encode_field(:x, "x", type: :quantitative)
+  |> Vl.encode_field(:y, "y", type: :quantitative)
+  |> Vl.encode_field(:color, "label", type: :nominal)
+
+Vl.new(width: 520, height: 420)
+|> Vl.layers([spiral_background, spiral_foreground])
+```
+
+## 8. Failure modes
+
+With high noise and very little capacity, the model may reduce loss but still draw a poor boundary. This is expected: there is not enough clean signal or model capacity.
+
+```elixir
+failure_dataset = Datasets.moons(40, noise: 0.35, seed: seed)
+failure_model = MLP.new(2, [1, 1], seed: seed)
+failure_initial = Losses.max_margin(failure_model, failure_dataset.xs, failure_dataset.ys)
+
+failure_run =
+  Trainer.train(failure_model, failure_dataset,
+    steps: 8,
+    alpha: 1.0e-4,
+    learning_rate: 0.2
+  )
+
+%{
+  parameter_count: NN.parameter_count(failure_model),
+  initial_loss: failure_initial.total_loss.data,
+  final_loss: failure_run.final_loss,
+  final_accuracy_percent: failure_run.final_accuracy * 100.0
+}
+```
+
+## 9. Things to try next
+
+Try changing one setting at a time:
+
+* increase `steps` for the spiral challenge;
+* compare `[4, 4, 1]` and `[32, 32, 1]`;
+* increase `noise` and watch accuracy;
+* set `alpha: 0.0`;
+* make the decision-boundary grid coarser with `h: 0.5`.

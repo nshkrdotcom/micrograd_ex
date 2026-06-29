@@ -1,0 +1,32 @@
+# The directory Mix will write compiled artifacts to.
+/_build/
+
+# If you run "mix test --cover", coverage assets end up here.
+/cover/
+
+# The directory Mix downloads your dependencies sources to.
+/deps/
+
+# Where third-party dependencies like ExDoc output generated docs.
+/doc/
+
+# Temporary files, for example, from tests.
+/tmp/
+
+# If the VM crashes, it generates a dump, let's ignore it too.
+erl_crash.dump
+
+# Also ignore archive artifacts (built via "mix archive.build").
+*.ez
+
+# Ignore package tarball (built via "mix hex.build").
+micrograd_ex-*.tar
+
+# Livebook-local runtime state and exported notebook checkpoints.
+.livebook/
+.ipynb_checkpoints/
+
+# The parent repository contains a broad Python-oriented `lib/` ignore rule.
+# In this Elixir project, `lib/` is source code and must remain trackable.
+!/lib/
+!/lib/**

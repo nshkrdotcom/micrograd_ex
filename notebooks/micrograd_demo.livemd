@@ -1,0 +1,276 @@
+# MicrogradEx Livebook Demo
+
+## Section
+
+This notebook recreates the official micrograd demo in pure Elixir. It uses scalar reverse-mode autodiff, a tiny MLP, deterministic two-moons data, max-margin classification loss, and immutable model updates.
+
+Livebook, Kino, and Vega-Lite are used only for workflow and visualization. The dataset, loss, training loop, and plot rows come from regular tested library modules.
+
+## Setup
+
+```elixir
+micrograd_ex_path =
+  [
+    System.get_env("MICROGRAD_EX_PATH"),
+    Path.expand("..", __DIR__),
+    Path.expand(".", __DIR__),
+    File.cwd!(),
+    Path.expand("micrograd_ex", File.cwd!())
+  ]
+  |> Enum.reject(&is_nil/1)
+  |> Enum.find(fn path ->
+    File.exists?(Path.join(path, "mix.exs")) and
+      File.exists?(Path.join(path, "lib/micrograd_ex.ex"))
+  end) ||
+    raise """
+    Could not locate the MicrogradEx Mix project.
+
+    Set MICROGRAD_EX_PATH to the repository path, for example:
+    /home/home/p/g/n/learning/micrograd_ex
+    """
+
+Mix.install([
+  {:micrograd_ex, path: micrograd_ex_path},
+  {:kino, "~> 0.14"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:vega_lite, "~> 0.1"}
+])
+
+alias VegaLite, as: Vl
+
+alias MicrogradEx.Value
+alias MicrogradEx.NN
+alias MicrogradEx.NN.MLP
+alias MicrogradEx.Datasets
+alias MicrogradEx.Losses
+alias MicrogradEx.Trainer
+alias MicrogradEx.PlotData
+alias MicrogradEx.Graph
+```
+
+## 1. Scalar autodiff warmup
+
+The forward pass creates a scalar computation graph. The backward pass returns a `Gradients` table; it does not mutate `x`.
+
+```elixir
+x = Value.new(-4.0, label: "x")
+
+z =
+  2
+  |> Value.mul(x)
+  |> Value.add(2)
+  |> Value.add(x)
+
+q =
+  z
+  |> Value.relu()
+  |> Value.add(Value.mul(z, x))
+
+h =
+  z
+  |> Value.mul(z)
+  |> Value.relu()
+
+y =
+  h
+  |> Value.add(q)
+  |> Value.add(Value.mul(q, x))
+
+gradients = Value.backward(y)
+
+%{
+  y: y.data,
+  dy_dx: Value.grad(x, gradients),
+  x_grad_field: x.grad
+}
+```
+
+## 1b. Inspect the scalar graph
+
+The graph rows show the scalar operations produced by the forward pass. The gradient column comes from the external `Gradients` table returned by `Value.backward/1`.
+
+```elixir
+Graph.nodes(y, gradients)
+|> Kino.DataTable.new()
+```
+
+```elixir
+Graph.edges(y)
+|> Enum.map(&Map.take(&1, [:from, :to, :child_op, :local_gradient]))
+|> Kino.DataTable.new()
+```
+
+The DOT text can be copied into a Graphviz renderer if you want an image. MicrogradEx does not require Graphviz to inspect the graph.
+
+```elixir
+Graph.to_dot(y, gradients)
+```
+
+## 2. Make a two-moons dataset
+
+The official Python demo uses `sklearn.datasets.make_moons(n_samples=100, noise=0.1)`. Here the same workflow is implemented directly in Elixir.
+
+```elixir
+dataset =
+  Datasets.moons(100,
+    noise: 0.1,
+    seed: {1337, 1337, 1337}
+  )
+
+dataset.metadata
+```
+
+```elixir
+dataset.points
+|> Enum.take(10)
+|> Kino.DataTable.new()
+```
+
+## 3. Visualize the dataset
+
+```elixir
+dataset_rows = PlotData.dataset_points(dataset)
+
+Vl.new(width: 420, height: 420)
+|> Vl.data_from_values(dataset_rows)
+|> Vl.mark(:point, filled: true, size: 80)
+|> Vl.encode_field(:x, "x", type: :quantitative)
+|> Vl.encode_field(:y, "y", type: :quantitative)
+|> Vl.encode_field(:color, "label", type: :nominal)
+```
+
+## 4. Initialize a tiny MLP
+
+The official demo model shape is `MLP(2, [16, 16, 1])`. Its parameter count is `337`.
+
+```elixir
+model = MLP.new(2, [16, 16, 1], seed: {1337, 1337, 1337})
+
+parameter_count = NN.parameter_count(model)
+
+if parameter_count != 337 do
+  raise "expected official demo model to have 337 parameters, got #{parameter_count}"
+end
+
+%{
+  parameter_count: parameter_count,
+  expected_parameter_count: 337,
+  first_layer: "16 * (2 weights + 1 bias) = 48",
+  second_layer: "16 * (16 weights + 1 bias) = 272",
+  final_layer: "1 * (16 weights + 1 bias) = 17"
+}
+```
+
+## 5. Define and inspect the loss
+
+The max-margin loss penalizes examples inside the margin. L2 regularization discourages large weights. A positive score predicts class `1`; a non-positive score predicts class `-1`.
+
+```elixir
+initial_loss = Losses.max_margin(model, dataset.xs, dataset.ys)
+
+%{
+  total_loss: initial_loss.total_loss.data,
+  data_loss: initial_loss.data_loss.data,
+  reg_loss: initial_loss.reg_loss.data,
+  accuracy: initial_loss.accuracy,
+  accuracy_percent: initial_loss.accuracy * 100.0
+}
+```
+
+## 6. Train the model
+
+The training loop computes the scalar loss, runs `Value.backward/1`, and returns a new model at every step through `NN.apply_gradients/3`.
+
+```elixir
+run =
+  Trainer.train(model, dataset,
+    steps: 100,
+    alpha: 1.0e-4,
+    learning_rate: &Trainer.official_micrograd_learning_rate/1,
+    log_every: 1
+  )
+
+%{
+  final_loss: run.final_loss,
+  final_accuracy: run.final_accuracy,
+  final_accuracy_percent: run.final_accuracy * 100.0
+}
+```
+
+```elixir
+run
+|> PlotData.training_history()
+|> Kino.DataTable.new()
+```
+
+## 7. Plot training loss
+
+```elixir
+loss_rows = PlotData.loss_history(run)
+
+Vl.new(width: 640, height: 280)
+|> Vl.data_from_values(loss_rows)
+|> Vl.mark(:line)
+|> Vl.encode_field(:x, "step", type: :quantitative, axis: [tickCount: 10])
+|> Vl.encode_field(:y, "value", type: :quantitative)
+|> Vl.encode_field(:color, "metric", type: :nominal)
+```
+
+## 8. Plot training accuracy
+
+```elixir
+accuracy_rows = PlotData.accuracy_history(run)
+
+Vl.new(width: 640, height: 280)
+|> Vl.data_from_values(accuracy_rows)
+|> Vl.mark(:line)
+|> Vl.encode_field(:x, "step", type: :quantitative, axis: [tickCount: 10])
+|> Vl.encode_field(:y, "value", type: :quantitative, title: "accuracy (%)")
+```
+
+## 9. Visualize the decision boundary
+
+Background color is the model prediction; outlined points are the training labels.
+
+```elixir
+boundary =
+  PlotData.decision_boundary(run.final_model, dataset,
+    h: 0.25,
+    padding: 1.0
+  )
+
+points = PlotData.dataset_points(dataset)
+
+background =
+  Vl.new()
+  |> Vl.data_from_values(boundary)
+  |> Vl.mark(:point, filled: true, opacity: 0.28, size: 80)
+  |> Vl.encode_field(:x, "x", type: :quantitative)
+  |> Vl.encode_field(:y, "y", type: :quantitative)
+  |> Vl.encode_field(:color, "predicted", type: :nominal)
+
+foreground =
+  Vl.new()
+  |> Vl.data_from_values(points)
+  |> Vl.mark(:point, filled: true, size: 90, stroke: "black", strokeWidth: 1)
+  |> Vl.encode_field(:x, "x", type: :quantitative)
+  |> Vl.encode_field(:y, "y", type: :quantitative)
+  |> Vl.encode_field(:color, "label", type: :nominal)
+
+Vl.new(width: 520, height: 420)
+|> Vl.layers([background, foreground])
+```
+
+## 10. What changed from Python micrograd?
+
+Python micrograd mutates `Value.grad`; MicrogradEx returns a `Gradients` table. Python mutates parameter `.data`; MicrogradEx returns a new model. Python training loops call `zero_grad`; MicrogradEx does not need it because gradients are not stored in the model. The two-moons dataset is implemented in pure Elixir rather than imported from sklearn, and charts use Vega-Lite rather than Matplotlib.
+
+## 11. Try it yourself
+
+Try changing one value at a time in the cells above:
+
+* `noise: 0.2`
+* `MLP.new(2, [8, 8, 1])`
+* `steps: 50`
+* `alpha: 0.0`
+* `h: 0.15`
