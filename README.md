@@ -48,7 +48,7 @@ mix do local.rebar --force, local.hex --force
 mix escript.install hex livebook
 ```
 
-Path may not be found. If needed:
+Path may not be found. If you're using asdf and if needed:
 
 ```bash
 asdf reshim elixir
